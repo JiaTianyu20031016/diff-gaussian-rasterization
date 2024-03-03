@@ -138,6 +138,238 @@ __device__ void computeColorFromSH(int idx, int deg, int max_coeffs, const glm::
 	dL_dmeans[idx] += glm::vec3(dL_dmean.x, dL_dmean.y, dL_dmean.z);
 }
 
+// Backward pass for conversion of spherical harmonics to deltaS or deltaX for
+// each Gaussian.
+__device__ void computeVec3FromSH(int idx, int deg, int max_coeffs, const glm::vec3 pos, glm::vec3 campos, const float* shs, const glm::vec3 dL_dvec3, glm::vec3* dL_dmeans, glm::vec3* dL_dshs)
+{
+	// Compute intermediate values, as it is done during forward
+	glm::vec3 dir_orig = pos - campos;
+	glm::vec3 dir = dir_orig / glm::length(dir_orig);
+
+	glm::vec3* sh = ((glm::vec3*)shs) + idx * max_coeffs;
+
+	glm::vec3 dvec3dx(0, 0, 0);
+	glm::vec3 dvec3dy(0, 0, 0);
+	glm::vec3 dvec3dz(0, 0, 0);
+	float x = dir.x;
+	float y = dir.y;
+	float z = dir.z;
+
+	// Target location for this Gaussian to write SH gradients to
+	glm::vec3* dL_dsh = dL_dshs + idx * max_coeffs;
+
+	// No tricks here, just high school-level calculus.
+	float dvec3dsh0 = SH_C0;
+	dL_dsh[0] = dvec3dsh0 * dL_dvec3;
+	if (deg > 0)
+	{
+		float dvec3dsh1 = -SH_C1 * y;
+		float dvec3dsh2 = SH_C1 * z;
+		float dvec3dsh3 = -SH_C1 * x;
+		dL_dsh[1] = dvec3dsh1 * dL_dvec3;
+		dL_dsh[2] = dvec3dsh2 * dL_dvec3;
+		dL_dsh[3] = dvec3dsh3 * dL_dvec3;
+
+		dvec3dx = -SH_C1 * sh[3];
+		dvec3dy = -SH_C1 * sh[1];
+		dvec3dz = SH_C1 * sh[2];
+
+		if (deg > 1)
+		{
+			float xx = x * x, yy = y * y, zz = z * z;
+			float xy = x * y, yz = y * z, xz = x * z;
+
+			float dvec3dsh4 = SH_C2[0] * xy;
+			float dvec3dsh5 = SH_C2[1] * yz;
+			float dvec3dsh6 = SH_C2[2] * (2.f * zz - xx - yy);
+			float dvec3dsh7 = SH_C2[3] * xz;
+			float dvec3dsh8 = SH_C2[4] * (xx - yy);
+			dL_dsh[4] = dvec3dsh4 * dL_dvec3;
+			dL_dsh[5] = dvec3dsh5 * dL_dvec3;
+			dL_dsh[6] = dvec3dsh6 * dL_dvec3;
+			dL_dsh[7] = dvec3dsh7 * dL_dvec3;
+			dL_dsh[8] = dvec3dsh8 * dL_dvec3;
+
+			dvec3dx += SH_C2[0] * y * sh[4] + SH_C2[2] * 2.f * -x * sh[6] + SH_C2[3] * z * sh[7] + SH_C2[4] * 2.f * x * sh[8];
+			dvec3dy += SH_C2[0] * x * sh[4] + SH_C2[1] * z * sh[5] + SH_C2[2] * 2.f * -y * sh[6] + SH_C2[4] * 2.f * -y * sh[8];
+			dvec3dz += SH_C2[1] * y * sh[5] + SH_C2[2] * 2.f * 2.f * z * sh[6] + SH_C2[3] * x * sh[7];
+
+			if (deg > 2)
+			{
+				float dvec3dsh9 = SH_C3[0] * y * (3.f * xx - yy);
+				float dvec3dsh10 = SH_C3[1] * xy * z;
+				float dvec3dsh11 = SH_C3[2] * y * (4.f * zz - xx - yy);
+				float dvec3dsh12 = SH_C3[3] * z * (2.f * zz - 3.f * xx - 3.f * yy);
+				float dvec3dsh13 = SH_C3[4] * x * (4.f * zz - xx - yy);
+				float dvec3dsh14 = SH_C3[5] * z * (xx - yy);
+				float dvec3dsh15 = SH_C3[6] * x * (xx - 3.f * yy);
+				dL_dsh[9] = dvec3dsh9 * dL_dvec3;
+				dL_dsh[10] = dvec3dsh10 * dL_dvec3;
+				dL_dsh[11] = dvec3dsh11 * dL_dvec3;
+				dL_dsh[12] = dvec3dsh12 * dL_dvec3;
+				dL_dsh[13] = dvec3dsh13 * dL_dvec3;
+				dL_dsh[14] = dvec3dsh14 * dL_dvec3;
+				dL_dsh[15] = dvec3dsh15 * dL_dvec3;
+
+				dvec3dx += (
+					SH_C3[0] * sh[9] * 3.f * 2.f * xy +
+					SH_C3[1] * sh[10] * yz +
+					SH_C3[2] * sh[11] * -2.f * xy +
+					SH_C3[3] * sh[12] * -3.f * 2.f * xz +
+					SH_C3[4] * sh[13] * (-3.f * xx + 4.f * zz - yy) +
+					SH_C3[5] * sh[14] * 2.f * xz +
+					SH_C3[6] * sh[15] * 3.f * (xx - yy));
+
+				dvec3dy += (
+					SH_C3[0] * sh[9] * 3.f * (xx - yy) +
+					SH_C3[1] * sh[10] * xz +
+					SH_C3[2] * sh[11] * (-3.f * yy + 4.f * zz - xx) +
+					SH_C3[3] * sh[12] * -3.f * 2.f * yz +
+					SH_C3[4] * sh[13] * -2.f * xy +
+					SH_C3[5] * sh[14] * -2.f * yz +
+					SH_C3[6] * sh[15] * -3.f * 2.f * xy);
+
+				dvec3dz += (
+					SH_C3[1] * sh[10] * xy +
+					SH_C3[2] * sh[11] * 4.f * 2.f * yz +
+					SH_C3[3] * sh[12] * 3.f * (2.f * zz - xx - yy) +
+					SH_C3[4] * sh[13] * 4.f * 2.f * xz +
+					SH_C3[5] * sh[14] * (xx - yy));
+			}
+		}
+	}
+
+	// The view direction is an input to the computation. View direction
+	// is influenced by the Gaussian's mean, so SHs gradients
+	// must propagate back into 3D position.
+	glm::vec3 dL_ddir(glm::dot(dvec3dx, dL_dvec3), glm::dot(dvec3dy, dL_dvec3), glm::dot(dvec3dz, dL_dvec3));
+
+	// Account for normalization of direction
+	float3 dL_dmean = dnormvdv(float3{ dir_orig.x, dir_orig.y, dir_orig.z }, float3{ dL_ddir.x, dL_ddir.y, dL_ddir.z });
+
+	// Gradients of loss w.r.t. Gaussian means, but only the portion 
+	// that is caused because the mean affects the view-dependent color.
+	// Additional mean gradient is accumulated in below methods.
+	dL_dmeans[idx] += glm::vec3(dL_dmean.x, dL_dmean.y, dL_dmean.z);
+}
+
+// Backward pass for conversion of spherical harmonics to deltaR for
+// each Gaussian.
+__device__ void computeVec4FromSH(int idx, int deg, int max_coeffs, const glm::vec3 pos, glm::vec3 campos, const float* shs, const glm::vec4 dL_dvec4, glm::vec3* dL_dmeans, glm::vec4* dL_dshs)
+{
+	// Compute intermediate values, as it is done during forward
+	glm::vec3 dir_orig = pos - campos;
+	glm::vec3 dir = dir_orig / glm::length(dir_orig);
+
+	glm::vec4* sh = ((glm::vec4*)shs) + idx * max_coeffs;
+
+	// Use PyTorch rule for clamping: if clamping was applied,
+	// gradient becomes 0.
+	glm::vec4 dvec4dx(0, 0, 0, 0);
+	glm::vec4 dvec4dy(0, 0, 0, 0);
+	glm::vec4 dvec4dz(0, 0, 0, 0);
+	float x = dir.x;
+	float y = dir.y;
+	float z = dir.z;
+
+	// Target location for this Gaussian to write SH gradients to
+	glm::vec4* dL_dsh = dL_dshs + idx * max_coeffs;
+
+	// No tricks here, just high school-level calculus.
+	float dvec4dsh0 = SH_C0;
+	dL_dsh[0] = dvec4dsh0 * dL_dvec4;
+	if (deg > 0)
+	{
+		float dvec4dsh1 = -SH_C1 * y;
+		float dvec4dsh2 = SH_C1 * z;
+		float dvec4dsh3 = -SH_C1 * x;
+		dL_dsh[1] = dvec4dsh1 * dL_dvec4;
+		dL_dsh[2] = dvec4dsh2 * dL_dvec4;
+		dL_dsh[3] = dvec4dsh3 * dL_dvec4;
+
+		dvec4dx = -SH_C1 * sh[3];
+		dvec4dy = -SH_C1 * sh[1];
+		dvec4dz = SH_C1 * sh[2];
+
+		if (deg > 1)
+		{
+			float xx = x * x, yy = y * y, zz = z * z;
+			float xy = x * y, yz = y * z, xz = x * z;
+
+			float dvec4dsh4 = SH_C2[0] * xy;
+			float dvec4dsh5 = SH_C2[1] * yz;
+			float dvec4dsh6 = SH_C2[2] * (2.f * zz - xx - yy);
+			float dvec4dsh7 = SH_C2[3] * xz;
+			float dvec4dsh8 = SH_C2[4] * (xx - yy);
+			dL_dsh[4] = dvec4dsh4 * dL_dvec4;
+			dL_dsh[5] = dvec4dsh5 * dL_dvec4;
+			dL_dsh[6] = dvec4dsh6 * dL_dvec4;
+			dL_dsh[7] = dvec4dsh7 * dL_dvec4;
+			dL_dsh[8] = dvec4dsh8 * dL_dvec4;
+
+			dvec4dx += SH_C2[0] * y * sh[4] + SH_C2[2] * 2.f * -x * sh[6] + SH_C2[3] * z * sh[7] + SH_C2[4] * 2.f * x * sh[8];
+			dvec4dy += SH_C2[0] * x * sh[4] + SH_C2[1] * z * sh[5] + SH_C2[2] * 2.f * -y * sh[6] + SH_C2[4] * 2.f * -y * sh[8];
+			dvec4dz += SH_C2[1] * y * sh[5] + SH_C2[2] * 2.f * 2.f * z * sh[6] + SH_C2[3] * x * sh[7];
+
+			if (deg > 2)
+			{
+				float dvec4dsh9 = SH_C3[0] * y * (3.f * xx - yy);
+				float dvec4dsh10 = SH_C3[1] * xy * z;
+				float dvec4dsh11 = SH_C3[2] * y * (4.f * zz - xx - yy);
+				float dvec4dsh12 = SH_C3[3] * z * (2.f * zz - 3.f * xx - 3.f * yy);
+				float dvec4dsh13 = SH_C3[4] * x * (4.f * zz - xx - yy);
+				float dvec4dsh14 = SH_C3[5] * z * (xx - yy);
+				float dvec4dsh15 = SH_C3[6] * x * (xx - 3.f * yy);
+				dL_dsh[9] = dvec4dsh9 * dL_dvec4;
+				dL_dsh[10] = dvec4dsh10 * dL_dvec4;
+				dL_dsh[11] = dvec4dsh11 * dL_dvec4;
+				dL_dsh[12] = dvec4dsh12 * dL_dvec4;
+				dL_dsh[13] = dvec4dsh13 * dL_dvec4;
+				dL_dsh[14] = dvec4dsh14 * dL_dvec4;
+				dL_dsh[15] = dvec4dsh15 * dL_dvec4;
+
+				dvec4dx += (
+					SH_C3[0] * sh[9] * 3.f * 2.f * xy +
+					SH_C3[1] * sh[10] * yz +
+					SH_C3[2] * sh[11] * -2.f * xy +
+					SH_C3[3] * sh[12] * -3.f * 2.f * xz +
+					SH_C3[4] * sh[13] * (-3.f * xx + 4.f * zz - yy) +
+					SH_C3[5] * sh[14] * 2.f * xz +
+					SH_C3[6] * sh[15] * 3.f * (xx - yy));
+
+				dvec4dy += (
+					SH_C3[0] * sh[9] * 3.f * (xx - yy) +
+					SH_C3[1] * sh[10] * xz +
+					SH_C3[2] * sh[11] * (-3.f * yy + 4.f * zz - xx) +
+					SH_C3[3] * sh[12] * -3.f * 2.f * yz +
+					SH_C3[4] * sh[13] * -2.f * xy +
+					SH_C3[5] * sh[14] * -2.f * yz +
+					SH_C3[6] * sh[15] * -3.f * 2.f * xy);
+
+				dvec4dz += (
+					SH_C3[1] * sh[10] * xy +
+					SH_C3[2] * sh[11] * 4.f * 2.f * yz +
+					SH_C3[3] * sh[12] * 3.f * (2.f * zz - xx - yy) +
+					SH_C3[4] * sh[13] * 4.f * 2.f * xz +
+					SH_C3[5] * sh[14] * (xx - yy));
+			}
+		}
+	}
+
+	// The view direction is an input to the computation. View direction
+	// is influenced by the Gaussian's mean, so SHs gradients
+	// must propagate back into 3D position.
+	glm::vec3 dL_ddir(glm::dot(dvec4dx, dL_dvec4), glm::dot(dvec4dy, dL_dvec4), glm::dot(dvec4dz, dL_dvec4));
+
+	// Account for normalization of direction
+	float3 dL_dmean = dnormvdv(float3{ dir_orig.x, dir_orig.y, dir_orig.z }, float3{ dL_ddir.x, dL_ddir.y, dL_ddir.z });
+
+	// Gradients of loss w.r.t. Gaussian means, but only the portion 
+	// that is caused because the mean affects the view-dependent color.
+	// Additional mean gradient is accumulated in below methods.
+	dL_dmeans[idx] += glm::vec3(dL_dmean.x, dL_dmean.y, dL_dmean.z);
+}
+
 // Backward version of INVERSE 2D covariance matrix computation
 // (due to length launched as separate kernel before other 
 // backward steps contained in preprocess)
@@ -275,10 +507,10 @@ __global__ void computeCov2DCUDA(int P,
 
 // Backward pass for the conversion of scale and rotation to a 
 // 3D covariance matrix for each Gaussian. 
-__device__ void computeCov3D(int idx, const glm::vec3 scale, float mod, const glm::vec4 rot, const float* dL_dcov3Ds, glm::vec3* dL_dscales, glm::vec4* dL_drots)
+__device__ void computeCov3D(int idx, glm::vec3 scale, float mod, glm::vec4 rot, const float* dL_dcov3Ds, glm::vec3* dL_dscales, glm::vec4* dL_drots)
 {
 	// Recompute (intermediate) results for the 3D covariance computation.
-	glm::vec4 q = rot;// / glm::length(rot);
+	glm::vec4 q = rot / glm::length(rot);
 	float r = q.x;
 	float x = q.y;
 	float y = q.z;
@@ -292,6 +524,8 @@ __device__ void computeCov3D(int idx, const glm::vec3 scale, float mod, const gl
 
 	glm::mat3 S = glm::mat3(1.0f);
 
+	//keep in mind that the parameter 'scale' has not been activated yet
+	scale.x = exp(scale.x); scale.y = exp(scale.y); scale.z = exp(scale.z);
 	glm::vec3 s = mod * scale;
 	S[0][0] = s.x;
 	S[1][1] = s.y;
@@ -319,10 +553,11 @@ __device__ void computeCov3D(int idx, const glm::vec3 scale, float mod, const gl
 	glm::mat3 dL_dMt = glm::transpose(dL_dM);
 
 	// Gradients of loss w.r.t. scale
+	// note: in this version activation is done in cuda instead of pytorch, so gredient must be passed through activation(exp)
 	glm::vec3* dL_dscale = dL_dscales + idx;
-	dL_dscale->x = glm::dot(Rt[0], dL_dMt[0]);
-	dL_dscale->y = glm::dot(Rt[1], dL_dMt[1]);
-	dL_dscale->z = glm::dot(Rt[2], dL_dMt[2]);
+	dL_dscale->x = glm::dot(Rt[0], dL_dMt[0]) * scale.x;
+	dL_dscale->y = glm::dot(Rt[1], dL_dMt[1]) * scale.y;
+	dL_dscale->z = glm::dot(Rt[2], dL_dMt[2]) * scale.z;
 
 	dL_dMt[0] *= s.x;
 	dL_dMt[1] *= s.y;
@@ -337,7 +572,7 @@ __device__ void computeCov3D(int idx, const glm::vec3 scale, float mod, const gl
 
 	// Gradients of loss w.r.t. unnormalized quaternion
 	float4* dL_drot = (float4*)(dL_drots + idx);
-	*dL_drot = float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w };//dnormvdv(float4{ rot.x, rot.y, rot.z, rot.w }, float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w });
+	*dL_drot = dnormvdv(float4{ rot.x, rot.y, rot.z, rot.w }, float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w });
 }
 
 // Backward pass of the preprocessing steps, except
@@ -347,8 +582,12 @@ template<int C>
 __global__ void preprocessCUDA(
 	int P, int D, int M,
 	const float3* means,
+	const float3* deltaXs,
 	const int* radii,
-	const float* shs,
+	const float* features,
+	const float* features_deltaS,
+	const float* features_deltaR,
+	const float* features_deltaX,
 	const bool* clamped,
 	const glm::vec3* scales,
 	const glm::vec4* rotations,
@@ -356,10 +595,16 @@ __global__ void preprocessCUDA(
 	const float* proj,
 	const glm::vec3* campos,
 	const float3* dL_dmean2D,
+	const glm::vec3* dL_ddeltaS,
+	const glm::vec4* dL_ddeltaR,
+	const glm::vec3* dL_ddeltaX,
 	glm::vec3* dL_dmeans,
 	float* dL_dcolor,
 	float* dL_dcov3D,
-	float* dL_dsh,
+	float* dL_dfeature,
+	float* dL_dfeature_deltaS,
+	float* dL_dfeature_deltaR,
+	float* dL_dfeature_deltaX,
 	glm::vec3* dL_dscale,
 	glm::vec4* dL_drot)
 {
@@ -387,12 +632,17 @@ __global__ void preprocessCUDA(
 	dL_dmeans[idx] += dL_dmean;
 
 	// Compute gradient updates due to computing colors from SHs
-	if (shs)
-		computeColorFromSH(idx, D, M, (glm::vec3*)means, *campos, shs, clamped, (glm::vec3*)dL_dcolor, (glm::vec3*)dL_dmeans, (glm::vec3*)dL_dsh);
+	if (features)
+		computeColorFromSH(idx, D, M, (glm::vec3*)means, *campos, features, clamped, (glm::vec3*)dL_dcolor, (glm::vec3*)dL_dmeans, (glm::vec3*)dL_dfeature);
 
 	// Compute gradient updates due to computing covariance from scale/rotation
-	if (scales)
+	if (scales){
 		computeCov3D(idx, scales[idx], scale_modifier, rotations[idx], dL_dcov3D, dL_dscale, dL_drot);
+		// note: must NOT change the order, gredient of feature_deltaX must be calculated first
+		computeVec3FromSH(idx, D, M, ((glm::vec3*)means)[idx]-((glm::vec3*)deltaXs)[idx], *campos, features_deltaX, dL_dmeans[idx]+dL_ddeltaX[idx], (glm::vec3*)dL_dmeans, (glm::vec3*)dL_dfeature_deltaX);
+		computeVec3FromSH(idx, D, M, ((glm::vec3*)means)[idx]-((glm::vec3*)deltaXs)[idx], *campos, features_deltaS, dL_dscale[idx]+dL_ddeltaS[idx], (glm::vec3*)dL_dmeans, (glm::vec3*)dL_dfeature_deltaS);
+		computeVec4FromSH(idx, D, M, ((glm::vec3*)means)[idx]-((glm::vec3*)deltaXs)[idx], *campos, features_deltaR, dL_drot[idx]+dL_ddeltaR[idx], (glm::vec3*)dL_dmeans, (glm::vec4*)dL_dfeature_deltaR);
+	}
 }
 
 // Backward version of the rendering procedure.
@@ -533,7 +783,6 @@ renderCUDA(
 				bg_dot_dpixel += bg_color[i] * dL_dpixel[i];
 			dL_dalpha += (-T_final / (1.f - alpha)) * bg_dot_dpixel;
 
-
 			// Helpful reusable temporary variables
 			const float dL_dG = con_o.w * dL_dalpha;
 			const float gdx = G * d.x;
@@ -559,8 +808,12 @@ renderCUDA(
 void BACKWARD::preprocess(
 	int P, int D, int M,
 	const float3* means3D,
+	const float3* deltaXs,
 	const int* radii,
-	const float* shs,
+	const float* features,
+	const float* features_deltaS,
+	const float* features_deltaR,
+	const float* features_deltaX,
 	const bool* clamped,
 	const glm::vec3* scales,
 	const glm::vec4* rotations,
@@ -573,10 +826,16 @@ void BACKWARD::preprocess(
 	const glm::vec3* campos,
 	const float3* dL_dmean2D,
 	const float* dL_dconic,
+	const glm::vec3* dL_ddeltaS,
+	const glm::vec4* dL_ddeltaR,
+	const glm::vec3* dL_ddeltaX,
 	glm::vec3* dL_dmean3D,
 	float* dL_dcolor,
 	float* dL_dcov3D,
-	float* dL_dsh,
+	float* dL_dfeature,
+	float* dL_dfeature_deltaS,
+	float* dL_dfeature_deltaR,
+	float* dL_dfeature_deltaX,
 	glm::vec3* dL_dscale,
 	glm::vec4* dL_drot)
 {
@@ -604,8 +863,12 @@ void BACKWARD::preprocess(
 	preprocessCUDA<NUM_CHANNELS> << < (P + 255) / 256, 256 >> > (
 		P, D, M,
 		(float3*)means3D,
+		(float3*)deltaXs,
 		radii,
-		shs,
+		features,
+		features_deltaS,
+		features_deltaR,
+		features_deltaX,
 		clamped,
 		(glm::vec3*)scales,
 		(glm::vec4*)rotations,
@@ -613,10 +876,16 @@ void BACKWARD::preprocess(
 		projmatrix,
 		campos,
 		(float3*)dL_dmean2D,
+		dL_ddeltaS,
+		dL_ddeltaR,
+		dL_ddeltaX,
 		(glm::vec3*)dL_dmean3D,
 		dL_dcolor,
 		dL_dcov3D,
-		dL_dsh,
+		dL_dfeature,
+		dL_dfeature_deltaS,
+		dL_dfeature_deltaR,
+		dL_dfeature_deltaX,
 		dL_dscale,
 		dL_drot);
 }

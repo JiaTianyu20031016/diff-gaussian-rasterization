@@ -17,12 +17,12 @@ namespace cg = cooperative_groups;
 
 // Forward method for converting the input spherical harmonics
 // coefficients of each Gaussian to a simple RGB color.
-__device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const glm::vec3* means, glm::vec3 campos, const float* shs, bool* clamped)
+__device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const glm::vec3* means, const glm::vec3* deltaXs, glm::vec3 campos, const float* shs, bool* clamped)
 {
 	// The implementation is loosely based on code for 
 	// "Differentiable Point-Based Radiance Fields for 
 	// Efficient View Synthesis" by Zhang et al. (2022)
-	glm::vec3 pos = means[idx];
+	glm::vec3 pos = means[idx] + deltaXs[idx];
 	glm::vec3 dir = pos - campos;
 	dir = dir / glm::length(dir);
 
@@ -68,6 +68,104 @@ __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const 
 	clamped[3 * idx + 1] = (result.y < 0);
 	clamped[3 * idx + 2] = (result.z < 0);
 	return glm::max(result, 0.0f);
+}
+
+// Forward method for converting the input spherical harmonics
+// coefficients of each Gaussian to delta X or delta S.
+__device__ glm::vec3 computeVec3DFromSH(int idx, int deg, int max_coeffs, const glm::vec3* means, glm::vec3 campos, const float* shs)
+{
+	// The implementation is loosely based on code for 
+	// "Differentiable Point-Based Radiance Fields for 
+	// Efficient View Synthesis" by Zhang et al. (2022)
+	glm::vec3 pos = means[idx];
+	glm::vec3 dir = pos - campos;
+	dir = dir / glm::length(dir);
+
+	glm::vec3* sh = ((glm::vec3*)shs) + idx * max_coeffs;
+	glm::vec3 result = SH_C0 * sh[0];
+
+	if (deg > 0)
+	{
+		float x = dir.x;
+		float y = dir.y;
+		float z = dir.z;
+		result = result - SH_C1 * y * sh[1] + SH_C1 * z * sh[2] - SH_C1 * x * sh[3];
+
+		if (deg > 1)
+		{
+			float xx = x * x, yy = y * y, zz = z * z;
+			float xy = x * y, yz = y * z, xz = x * z;
+			result = result +
+				SH_C2[0] * xy * sh[4] +
+				SH_C2[1] * yz * sh[5] +
+				SH_C2[2] * (2.0f * zz - xx - yy) * sh[6] +
+				SH_C2[3] * xz * sh[7] +
+				SH_C2[4] * (xx - yy) * sh[8];
+
+			if (deg > 2)
+			{
+				result = result +
+					SH_C3[0] * y * (3.0f * xx - yy) * sh[9] +
+					SH_C3[1] * xy * z * sh[10] +
+					SH_C3[2] * y * (4.0f * zz - xx - yy) * sh[11] +
+					SH_C3[3] * z * (2.0f * zz - 3.0f * xx - 3.0f * yy) * sh[12] +
+					SH_C3[4] * x * (4.0f * zz - xx - yy) * sh[13] +
+					SH_C3[5] * z * (xx - yy) * sh[14] +
+					SH_C3[6] * x * (xx - 3.0f * yy) * sh[15];
+			}
+		}
+	}
+
+	return result;
+}
+
+// Forward method for converting the input spherical harmonics
+// coefficients of each Gaussian to delta R.
+__device__ glm::vec4 computeVec4DFromSH(int idx, int deg, int max_coeffs, const glm::vec3* means, glm::vec3 campos, const float* shs)
+{
+	// The implementation is loosely based on code for 
+	// "Differentiable Point-Based Radiance Fields for 
+	// Efficient View Synthesis" by Zhang et al. (2022)
+	glm::vec3 pos = means[idx];
+	glm::vec3 dir = pos - campos;
+	dir = dir / glm::length(dir);
+
+	glm::vec4* sh = ((glm::vec4*)shs) + idx * max_coeffs;
+	glm::vec4 result = SH_C0 * sh[0];
+
+	if (deg > 0)
+	{
+		float x = dir.x;
+		float y = dir.y;
+		float z = dir.z;
+		result = result - SH_C1 * y * sh[1] + SH_C1 * z * sh[2] - SH_C1 * x * sh[3];
+
+		if (deg > 1)
+		{
+			float xx = x * x, yy = y * y, zz = z * z;
+			float xy = x * y, yz = y * z, xz = x * z;
+			result = result +
+				SH_C2[0] * xy * sh[4] +
+				SH_C2[1] * yz * sh[5] +
+				SH_C2[2] * (2.0f * zz - xx - yy) * sh[6] +
+				SH_C2[3] * xz * sh[7] +
+				SH_C2[4] * (xx - yy) * sh[8];
+
+			if (deg > 2)
+			{
+				result = result +
+					SH_C3[0] * y * (3.0f * xx - yy) * sh[9] +
+					SH_C3[1] * xy * z * sh[10] +
+					SH_C3[2] * y * (4.0f * zz - xx - yy) * sh[11] +
+					SH_C3[3] * z * (2.0f * zz - 3.0f * xx - 3.0f * yy) * sh[12] +
+					SH_C3[4] * x * (4.0f * zz - xx - yy) * sh[13] +
+					SH_C3[5] * z * (xx - yy) * sh[14] +
+					SH_C3[6] * x * (xx - 3.0f * yy) * sh[15];
+			}
+		}
+	}
+
+	return result;
 }
 
 // Forward version of 2D covariance matrix computation
@@ -159,7 +257,13 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	const float scale_modifier,
 	const glm::vec4* rotations,
 	const float* opacities,
-	const float* shs,
+	const float* features,
+	const float* features_deltaS,
+	const float* features_deltaR,
+	const float* features_deltaX,
+	float* deltaSs,
+	float* deltaRs,
+	float* deltaXs,
 	bool* clamped,
 	const float* cov3D_precomp,
 	const float* colors_precomp,
@@ -194,7 +298,11 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		return;
 
 	// Transform point by projecting
-	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
+	glm::vec3 deltaX = computeVec3DFromSH(idx, D, M, (glm::vec3*)orig_points, *cam_pos, features_deltaX);
+	deltaXs[3 * idx] = deltaX.x;
+	deltaXs[3 * idx + 1] = deltaX.y;
+	deltaXs[3 * idx + 2] = deltaX.z;
+	float3 p_orig = { orig_points[3 * idx] + deltaX.x, orig_points[3 * idx + 1] + deltaX.y, orig_points[3 * idx + 2] + deltaX.z };
 	float4 p_hom = transformPoint4x4(p_orig, projmatrix);
 	float p_w = 1.0f / (p_hom.w + 0.0000001f);
 	float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
@@ -208,7 +316,21 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	}
 	else
 	{
-		computeCov3D(scales[idx], scale_modifier, rotations[idx], cov3Ds + idx * 6);
+		// deform and activate
+		glm::vec3 deltaS = computeVec3DFromSH(idx, D, M, (glm::vec3*)orig_points, *cam_pos, features_deltaS);
+		glm::vec4 deltaR = computeVec4DFromSH(idx, D, M, (glm::vec3*)orig_points, *cam_pos, features_deltaR);
+		deltaSs[3 * idx] = deltaS.x;
+		deltaSs[3 * idx + 1] = deltaS.y;
+		deltaSs[3 * idx + 2] = deltaS.z;
+		deltaRs[4 * idx] = deltaR.x;
+		deltaRs[4 * idx + 1] = deltaR.y;
+		deltaRs[4 * idx + 2] = deltaR.z;
+		deltaRs[4 * idx + 3] = deltaR.w;
+		glm::vec3 scale = scales[idx] + deltaS;
+		glm::vec4 rotation = rotations[idx] + deltaR;
+		scale.x = exp(scale.x);scale.y = exp(scale.y);scale.z = exp(scale.z);
+		rotation = glm::normalize(rotation);
+		computeCov3D(scale, scale_modifier, rotation, cov3Ds + idx * 6);
 		cov3D = cov3Ds + idx * 6;
 	}
 
@@ -240,7 +362,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	// spherical harmonics coefficients to RGB color.
 	if (colors_precomp == nullptr)
 	{
-		glm::vec3 result = computeColorFromSH(idx, D, M, (glm::vec3*)orig_points, *cam_pos, shs, clamped);
+		glm::vec3 result = computeColorFromSH(idx, D, M, (glm::vec3*)orig_points, (glm::vec3*)deltaXs, *cam_pos, features, clamped);
 		rgb[idx * C + 0] = result.x;
 		rgb[idx * C + 1] = result.y;
 		rgb[idx * C + 2] = result.z;
@@ -405,7 +527,13 @@ void FORWARD::preprocess(int P, int D, int M,
 	const float scale_modifier,
 	const glm::vec4* rotations,
 	const float* opacities,
-	const float* shs,
+	const float* features,
+	const float* features_deltaS,
+	const float* features_deltaR,
+	const float* features_deltaX,
+	float* deltaSs,
+	float* deltaRs,
+	float* deltaXs,
 	bool* clamped,
 	const float* cov3D_precomp,
 	const float* colors_precomp,
@@ -432,7 +560,13 @@ void FORWARD::preprocess(int P, int D, int M,
 		scale_modifier,
 		rotations,
 		opacities,
-		shs,
+		features,
+		features_deltaS,
+		features_deltaR,
+		features_deltaX,
+		deltaSs,
+		deltaRs,
+		deltaXs,
 		clamped,
 		cov3D_precomp,
 		colors_precomp,
